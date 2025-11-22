@@ -107,7 +107,7 @@
                     const data = await res.json();
                     if (res.ok && data.rdpUrl) {
                         setRdpLink(data.rdpUrl);
-                        addLog(`⚡ KẾT NỐI THÀNH CÔNG: ${data.rdpUrl}`, 'success');
+                        addLog(`⚡ KẾT NỐI THÀNH CÔNG`, 'success');
                         setStatus('complete');
                     }
                 } catch (e) {}
@@ -140,15 +140,21 @@
             };
 
             const handleStop = async () => {
-                if (!confirm('Bạn có chắc chắn muốn hủy và XÓA Repo này không?')) return;
-                addLog('Đang gửi lệnh xóa...', 'warning');
-                // Gọi API xóa
+                if (!confirm('Xóa toàn bộ?')) return;
+                addLog('Đang xóa...', 'warning');
                 await callApi('/api/delete', config);
-                addLog('✔ Đã xóa Repo thành công.', 'success');
+                addLog('✔ Đã dọn dẹp.', 'success');
                 setStatus('idle'); setRdpLink(null);
             };
 
             const formatTime = (s) => new Date(s * 1000).toISOString().substr(14, 5);
+
+            // Tạo text định dạng chuẩn để copy
+            const getFormattedOutput = () => {
+                if (!rdpLink) return '';
+                const cleanLink = rdpLink.replace('tcp://', '');
+                return `=====================================================\n✅ RDP Instance IS READY!\nRDP ADDRESS: ${cleanLink}\nUsername: rdpuser\nPassword: ${config.rdpPassword}\n=====================================================`;
+            };
 
             return (
                 <div className="min-h-screen flex items-center justify-center p-6">
@@ -193,7 +199,31 @@
                                 {logs.map((l, i) => <div key={i} className={`flex gap-3 pb-2 border-b border-white/5 last:border-0 ${l.type === 'error' ? 'text-red-400' : l.type === 'success' ? 'text-emerald-400' : l.type === 'warning' ? 'text-amber-400' : 'text-slate-300'}`}><span className="text-slate-600 shrink-0 select-none w-16">[{l.time}]</span><span className="break-all">{l.msg}</span></div>)}
                                 <div ref={logsEndRef}></div>
                             </div>
-                            {rdpLink && <div className="absolute bottom-0 left-0 w-full bg-emerald-900/90 backdrop-blur-xl border-t border-emerald-500/30 p-6 animate-glow"><div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4"><div><h3 className="text-emerald-300 font-bold flex items-center gap-2 mb-1"><Icon name="zap" size={18} /> RDP CONNECTION READY</h3><p className="text-emerald-200/70 text-xs">Máy chủ đã sẵn sàng kết nối. Mật khẩu: <span className="font-mono bg-emerald-950 px-1 rounded text-white">{config.rdpPassword}</span></p></div><div className="w-full md:w-auto bg-black/30 rounded-xl p-3 border border-emerald-500/30 flex items-center gap-3"><code className="text-white font-mono font-bold text-lg px-2">{rdpLink.replace('tcp://', '')}</code><button onClick={() => navigator.clipboard.writeText(rdpLink.replace('tcp://', ''))} className="p-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg transition"><Icon name="copy" size={18} /></button></div></div></div>}
+                            
+                            {/* PHẦN HIỂN THỊ KẾT QUẢ ĐÃ FORMAT */}
+                            {rdpLink && (
+                                <div className="absolute bottom-0 left-0 w-full bg-[#020617] border-t border-emerald-500/30 p-0 animate-slide-up">
+                                    <div className="flex">
+                                        {/* Khối văn bản định dạng chuẩn */}
+                                        <div className="flex-1 p-6 bg-emerald-950/20 font-mono text-sm text-emerald-100 whitespace-pre overflow-x-auto border-r border-emerald-500/20">
+                                            {getFormattedOutput()}
+                                        </div>
+                                        
+                                        {/* Nút Copy lớn */}
+                                        <button 
+                                            onClick={() => {
+                                                navigator.clipboard.writeText(getFormattedOutput());
+                                                addLog('Đã copy thông tin vào Clipboard!', 'success');
+                                            }}
+                                            className="w-24 bg-emerald-600 hover:bg-emerald-500 text-white flex flex-col items-center justify-center gap-2 transition-all active:bg-emerald-700"
+                                            title="Copy toàn bộ thông tin"
+                                        >
+                                            <Icon name="copy" size={24} />
+                                            <span className="text-xs font-bold">COPY ALL</span>
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
                         </div>
                     </div>
                 </div>
