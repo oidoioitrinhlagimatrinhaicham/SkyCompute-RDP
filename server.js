@@ -10,7 +10,7 @@ app.use(express.static(path.join(__dirname)));
 
 const GITHUB_API_URL = 'https://api.github.com';
 
-// WORKFLOW: Giữ nguyên
+// --- WORKFLOW ĐÃ THÊM LẠI PHẦN CONNECTION INFO ---
 const WORKFLOW_CONTENT = `
 name: Remote Desktop Connection
 on: 
@@ -25,20 +25,43 @@ jobs:
     timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
+      
       - name: Setup Ngrok
         run: |
           choco install ngrok -y
           ngrok authtoken \${{ secrets.NGROK_TOKEN }}
+          
+          # Chạy Ngrok ẩn
           Start-Process ngrok -ArgumentList "tcp 3389 --region \${{ github.event.inputs.region }}"
+          
+          # Đợi Ngrok khởi động
           Start-Sleep -Seconds 15
+          
+          # Lấy URL và in ra Log (cho Web bắt link)
           $url = (iwr -Uri http://127.0.0.1:4040/api/tunnels).Content | ConvertFrom-Json | Select-Object -ExpandProperty tunnels | Select-Object -ExpandProperty public_url
           Write-Host ":::RDP_LINK::: $url"
+          
+          # Lưu vào biến môi trường cho bước sau
+          echo "RDP_URL=$url" | Out-File -FilePath $env:GITHUB_ENV -Append
         shell: powershell
+        
       - name: Create User
         run: |
           net user \${{ github.event.inputs.username }} \${{ github.event.inputs.password }} /add /Y
           net localgroup administrators \${{ github.event.inputs.username }} /add
           netsh advfirewall firewall set rule group="remote desktop" new enable=Yes
+      
+      # --- BƯỚC NÀY ĐỂ HIỂN THỊ RÕ THÔNG TIN TRONG LOG GITHUB ---
+      - name: Display Connection Info
+        run: |
+          echo "====================================================="
+          echo "✅ RDP Instance IS READY!"
+          echo "RDP ADDRESS: \${{ env.RDP_URL }}"
+          echo "Username: \${{ github.event.inputs.username }}"
+          echo "Password: \${{ github.event.inputs.password }}"
+          echo "====================================================="
+        shell: bash
+
       - name: Keep Alive
         run: Start-Sleep -Seconds 21600
         shell: powershell
@@ -53,33 +76,34 @@ const callGitHub = async (token, method, url, data) => {
 
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-// Helper: Lấy Username từ Token (Dynamic User)
+// Helper: Lấy Username từ Token (Để hỗ trợ nhiều người dùng)
 const getUserLogin = async (token) => {
     const res = await callGitHub(token, 'GET', '/user');
     if (res.status !== 200) return null;
-    return res.data.login; 
+    return res.data.login;
 };
 
-// API 1: DEPLOY
+// API 1: DEPLOY (Tự xóa Repo trùng)
 app.post('/api/deploy', async (req, res) => {
     const { ghToken, repoName } = req.body;
     let logs = [];
     if (!ghToken) return res.status(400).send({ message: 'Thiếu Token' });
 
-    // 1. Tự động xác định User
     const username = await getUserLogin(ghToken);
     if (!username) return res.status(401).send({ message: 'Token không hợp lệ' });
     logs.push({ type: 'success', message: `✔ Xin chào, ${username}!` });
 
-    // 2. Dùng username động để thao tác
+    // --- TÍNH NĂNG XÓA REPO TRÙNG TÊN ---
     const check = await callGitHub(ghToken, 'GET', `/repos/${username}/${repoName}`);
     if (check.status === 200) {
+        logs.push({ type: 'warning', message: '⚠ Repo đã tồn tại. Đang xóa...' });
         await callGitHub(ghToken, 'DELETE', `/repos/${username}/${repoName}`);
-        logs.push({ type: 'warning', message: '⚠ Đã dọn dẹp Repo cũ.' });
+        // Đợi 2s để GitHub xử lý xóa xong trước khi tạo mới
+        await delay(2000);
     }
 
     const create = await callGitHub(ghToken, 'POST', '/user/repos', { name: repoName, private: true, auto_init: false });
-    if (create.status !== 201) return res.status(400).send({ message: 'Không thể tạo Repo', logs });
+    if (create.status !== 201) return res.status(400).send({ message: 'Không thể tạo Repo (Có thể do vừa xóa, hãy thử lại sau 10s)', logs });
     logs.push({ type: 'success', message: '✔ Repo mới đã được khởi tạo.' });
 
     await callGitHub(ghToken, 'PUT', `/repos/${username}/${repoName}/contents/README.md`, { message: 'init', content: Buffer.from('# RDP').toString('base64') });
@@ -96,7 +120,6 @@ app.post('/api/deploy', async (req, res) => {
 // API 2: DISPATCH
 app.post('/api/dispatch', async (req, res) => {
     const { ghToken, repoName, rdpPassword } = req.body;
-    
     const username = await getUserLogin(ghToken);
     if (!username) return res.status(401).send({ message: 'Token không hợp lệ' });
 
@@ -108,10 +131,9 @@ app.post('/api/dispatch', async (req, res) => {
     res.status(200).send({ logs: [{ type: 'success', message: '✔ Đã gửi lệnh khởi động Runner.' }] });
 });
 
-// API 3: GET LOG
+// API 3: GET LOG (Tự động tìm link)
 app.post('/api/get-rdp-link', async (req, res) => {
     const { ghToken, repoName } = req.body;
-    
     const username = await getUserLogin(ghToken);
     if (!username) return res.status(401).send({ message: 'Token Invalid' });
 
@@ -134,24 +156,20 @@ app.post('/api/get-rdp-link', async (req, res) => {
     return res.status(202).send({ message: 'Polling...' });
 });
 
-// API 4: DELETE
+// API 4: DELETE (Xóa repo khi bấm nút Dừng)
 app.delete('/api/delete', async (req, res) => {
     const { ghToken, repoName } = req.body;
     const username = await getUserLogin(ghToken);
     if (!username) return res.status(401).send({});
     
+    // Gọi GitHub API để xóa Repo
     const del = await callGitHub(ghToken, 'DELETE', `/repos/${username}/${repoName}`);
     res.status(del.status === 204 ? 200 : 400).send({});
 });
 
-// --- CẤU HÌNH ĐA NĂNG (QUAN TRỌNG) ---
-// 1. Xuất module cho Vercel
+// Cấu hình chạy server
 module.exports = app;
-
-// 2. Tự chạy Server nếu ở môi trường Local (Máy tính cá nhân)
 if (require.main === module) {
     const PORT = process.env.PORT || 3000;
-    app.listen(PORT, () => {
-        console.log(`✅ Server đang chạy tại: http://localhost:${PORT}`);
-    });
+    app.listen(PORT, () => console.log(`Server running at http://localhost:${PORT}`));
 }
