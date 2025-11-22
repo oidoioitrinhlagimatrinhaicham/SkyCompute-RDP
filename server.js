@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const path = require('path');
+const fs = require('fs'); // Thêm module fs để đọc file ảnh
 const app = express();
 const nacl = require('tweetnacl');
 nacl.util = require('tweetnacl-util');
@@ -12,7 +13,22 @@ app.use(express.static(path.join(__dirname)));
 
 const GITHUB_API_URL = 'https://api.github.com';
 
-// WORKFLOW: Đã sửa scoop -> choco, fix lỗi syntax PowerShell
+// Đọc file ảnh nền (wallpaper.jpg) và chuyển sang Base64
+let WALLPAPER_BASE64 = '';
+try {
+    const wallpaperPath = path.join(__dirname, 'wallpaper.jpg');
+    if (fs.existsSync(wallpaperPath)) {
+        WALLPAPER_BASE64 = fs.readFileSync(wallpaperPath, { encoding: 'base64' });
+        console.log('✔ Đã tải hình nền wallpaper.jpg');
+    } else {
+        console.log('⚠ Không tìm thấy file wallpaper.jpg. Bỏ qua bước đặt hình nền.');
+    }
+} catch (err) {
+    console.error('✖ Lỗi khi đọc file wallpaper.jpg:', err.message);
+}
+
+
+// WORKFLOW: Đã thêm bước đặt hình nền
 const WORKFLOW_CONTENT = `
 name: Remote Desktop Connection
 on: 
@@ -37,18 +53,36 @@ jobs:
           echo "RDP_URL=$url" | Out-File -FilePath $env:GITHUB_ENV -Append
           Write-Host ":::RDP_LINK::: $url"
         shell: powershell
-      - name: Create User
+      - name: Create User & Set Wallpaper
         run: |
+          # Tạo user
           net user \${{ github.event.inputs.username }} \${{ github.event.inputs.password }} /add /Y
           net localgroup administrators \${{ github.event.inputs.username }} /add
           netsh advfirewall firewall set rule group="remote desktop" new enable=Yes
+          
+          # --- Đặt hình nền ---
+          # 1. Tạo thư mục hình nền
+          $wallpaperDir = "C:\\Windows\\Web\\Wallpaper\\Windows"
+          if (!(Test-Path -Path $wallpaperDir)) { New-Item -ItemType Directory -Path $wallpaperDir -Force }
+          
+          # 2. Giải mã file ảnh từ Base64 trong biến môi trường và lưu lại
+          $wallpaperPath = Join-Path -Path $wallpaperDir -ChildPath "img0.jpg"
+          [System.IO.File]::WriteAllBytes($wallpaperPath, [System.Convert]::FromBase64String($env:WALLPAPER_BASE64_CONTENT))
+
+          # 3. Đặt Registry để áp dụng hình nền cho tất cả user
+          Set-ItemProperty -Path 'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System' -Name 'Wallpaper' -Value $wallpaperPath -Force
+          Set-ItemProperty -Path 'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System' -Name 'WallpaperStyle' -Value '2' -Force # 2 = Stretch
+        shell: powershell
+        env:
+          # Truyền nội dung Base64 của ảnh vào biến môi trường cho Runner
+          WALLPAPER_BASE64_CONTENT: \${{ secrets.WALLPAPER_CONTENT }}
       - name: Keep Alive
         run: Start-Sleep -Seconds 21600
         shell: powershell
 `;
 const WORKFLOW_BASE64 = Buffer.from(WORKFLOW_CONTENT).toString('base64');
 
-// HÀM MÃ HÓA SECRET (QUAN TRỌNG)
+// HÀM MÃ HÓA SECRET
 const encryptSecret = (publicKey, secretValue) => {
     const key = nacl.util.decodeBase64(publicKey);
     const secret = nacl.util.decodeUTF8(secretValue);
@@ -102,17 +136,30 @@ app.post('/api/deploy', async (req, res) => {
     await callGitHub(ghToken, 'PUT', `${repoPath}/contents/.github/workflows/main.yml`, { message: 'Add workflow', content: WORKFLOW_BASE64 });
     logs.push({ type: 'success', message: '✔ Đã nạp Workflow.' });
 
-    // 5. AUTO ADD SECRET (TỰ ĐỘNG MÃ HÓA)
-    logs.push({ type: 'info', message: '⚙ Đang mã hóa và thêm Secret...' });
+    // 5. AUTO ADD SECRETS (NGROK & WALLPAPER)
+    logs.push({ type: 'info', message: '⚙ Đang mã hóa và thêm Secrets...' });
     const keyRes = await callGitHub(ghToken, 'GET', `${repoPath}/actions/secrets/public-key`);
     if (keyRes.status !== 200) return res.status(400).send({ message: 'Lỗi lấy Public Key', logs });
+    const publicKey = keyRes.data.key;
+    const keyId = keyRes.data.key_id;
     
-    const encrypted = encryptSecret(keyRes.data.key, ngrokToken);
+    // Thêm Secret NGROK_TOKEN
+    const encryptedNgrok = encryptSecret(publicKey, ngrokToken);
     await callGitHub(ghToken, 'PUT', `${repoPath}/actions/secrets/NGROK_TOKEN`, {
-        encrypted_value: encrypted.encrypted_value,
-        key_id: keyRes.data.key_id
+        encrypted_value: encryptedNgrok.encrypted_value,
+        key_id: keyId
     });
     logs.push({ type: 'success', message: '✔ Đã thêm Secret NGROK_TOKEN.' });
+
+    // Thêm Secret WALLPAPER_CONTENT (Nếu có ảnh)
+    if (WALLPAPER_BASE64) {
+        const encryptedWallpaper = encryptSecret(publicKey, WALLPAPER_BASE64);
+        await callGitHub(ghToken, 'PUT', `${repoPath}/actions/secrets/WALLPAPER_CONTENT`, {
+            encrypted_value: encryptedWallpaper.encrypted_value,
+            key_id: keyId
+        });
+        logs.push({ type: 'success', message: '✔ Đã thêm Secret hình nền.' });
+    }
 
     // 6. DISPATCH (KÍCH HOẠT LUÔN)
     logs.push({ type: 'info', message: '⚡ Đang kích hoạt máy ảo...' });
