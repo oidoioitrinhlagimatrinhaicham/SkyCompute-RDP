@@ -3,232 +3,156 @@ const cors = require('cors');
 const axios = require('axios');
 const path = require('path');
 const app = express();
+const nacl = require('tweetnacl');
+nacl.util = require('tweetnacl-util');
 
 app.use(cors());
 app.use(express.json());
-// Phục vụ file tĩnh (index.html) từ thư mục hiện tại
 app.use(express.static(path.join(__dirname)));
 
 const GITHUB_API_URL = 'https://api.github.com';
 
-// --- WORKFLOW CONFIGURATION ---
-// Đã sửa lỗi: Dùng 'choco', 'Start-Process', tăng delay và echo Log đặc biệt
+// WORKFLOW: Đã sửa scoop -> choco, fix lỗi syntax PowerShell
 const WORKFLOW_CONTENT = `
 name: Remote Desktop Connection
-
 on: 
   workflow_dispatch:
     inputs:
-      username:
-        description: 'RDP Username'
-        required: true
-        default: 'rdpuser'
-      password:
-        description: 'RDP Password'
-        required: true
-        default: 'P@sswordRDP!2025'
-      region:
-        description: 'Ngrok Region (e.g., ap, us, eu)'
-        required: true
-        default: 'ap'
-
+      username: { description: 'User', required: true, default: 'rdpuser' }
+      password: { description: 'Pass', required: true, default: 'P@sswordRDP!2025' }
+      region: { description: 'Region', required: true, default: 'ap' }
 jobs:
   rdp_session:
     runs-on: windows-latest
     timeout-minutes: 360
-
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: Configure Ngrok Tunnel
-        id: ngrok_setup
+      - uses: actions/checkout@v4
+      - name: Setup Ngrok
         run: |
-          # Cài đặt Ngrok bằng Chocolatey (có sẵn trên Runner)
           choco install ngrok -y
           ngrok authtoken \${{ secrets.NGROK_TOKEN }}
-          
-          # Chạy Ngrok trong nền bằng Start-Process để tránh treo shell
           Start-Process ngrok -ArgumentList "tcp 3389 --region \${{ github.event.inputs.region }}"
-          
-          # Đợi 30 giây để Ngrok khởi động ổn định và tạo tunnel
           Start-Sleep -Seconds 30
-          
-          # Lấy URL từ API nội bộ của Ngrok
-          $ngrok_url = (iwr -Uri http://127.0.0.1:4040/api/tunnels).Content | ConvertFrom-Json | Select-Object -ExpandProperty tunnels | Select-Object -ExpandProperty public_url
-          
-          # Ghi URL vào biến môi trường và Log để Web bắt được
-          echo "RDP_URL=$ngrok_url" | Out-File -FilePath $env:GITHUB_ENV -Append
-          Write-Host ":::RDP_LINK::: $ngrok_url"
+          $url = (iwr -Uri http://127.0.0.1:4040/api/tunnels).Content | ConvertFrom-Json | Select-Object -ExpandProperty tunnels | Select-Object -ExpandProperty public_url
+          echo "RDP_URL=$url" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host ":::RDP_LINK::: $url"
         shell: powershell
-
-      - name: Configure RDP Credentials
+      - name: Create User
         run: |
-          # Tạo user và thêm vào nhóm Admin
-          net user \${{ github.event.inputs.username }} \${{ github.event.inputs.password }} /add
+          net user \${{ github.event.inputs.username }} \${{ github.event.inputs.password }} /add /Y
           net localgroup administrators \${{ github.event.inputs.username }} /add
-          # Mở firewall
           netsh advfirewall firewall set rule group="remote desktop" new enable=Yes
-
-      - name: Display Connection Info
-        run: |
-          echo "====================================================="
-          echo "✅ RDP Instance IS READY!"
-          echo "RDP ADDRESS: \${{ env.RDP_URL }}"
-          echo "Username: \${{ github.event.inputs.username }}"
-          echo "Password: \${{ github.event.inputs.password }}"
-          echo "====================================================="
-        shell: bash
-
-      - name: Keep Runner Alive
-        run: |
-          echo "RDP session is running. The runner will wait for 6 hours."
-          Start-Sleep -Seconds 21600
+      - name: Keep Alive
+        run: Start-Sleep -Seconds 21600
         shell: powershell
 `;
-// Mã hóa Base64 để gửi qua API
 const WORKFLOW_BASE64 = Buffer.from(WORKFLOW_CONTENT).toString('base64');
 
-// --- HELPER FUNCTIONS ---
-
-const callGitHub = async (token, method, endpoint, data = null) => {
-    const url = `${GITHUB_API_URL}${endpoint}`;
-    const headers = {
-        Authorization: `token ${token}`,
-        Accept: 'application/vnd.github.v3+json',
-        'Content-Type': 'application/json'
+// HÀM MÃ HÓA SECRET (QUAN TRỌNG)
+const encryptSecret = (publicKey, secretValue) => {
+    const key = nacl.util.decodeBase64(publicKey);
+    const secret = nacl.util.decodeUTF8(secretValue);
+    const nonce = nacl.randomBytes(nacl.box.nonceLength);
+    const encrypted = nacl.box.seal(secret, nonce, key, new Uint8Array(nacl.box.publicKeyLength));
+    return {
+        encrypted_value: nacl.util.encodeBase64(encrypted),
+        key_id: nacl.util.encodeBase64(nonce)
     };
+};
+
+const callGitHub = async (token, method, url, data) => {
     try {
-        const response = await axios({ method, url, headers, data });
-        return { status: response.status, data: response.data };
-    } catch (error) {
-        return { status: error.response?.status || 500, error: error.response?.data || error.message };
-    }
+        return await axios({ method, url: `${GITHUB_API_URL}${url}`, headers: { Authorization: `token ${token}`, Accept: 'application/vnd.github.v3+json' }, data });
+    } catch (e) { return { status: e.response?.status || 500, data: e.response?.data }; }
 };
 
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-const getUserLogin = async (token) => {
-    const res = await callGitHub(token, 'GET', '/user');
-    if (res.status !== 200) return null;
-    return res.data.login;
-};
-
-// --- API ENDPOINTS ---
-
-// 1. Deploy (Tạo Repo & File)
+// --- API DEPLOY (TỰ ĐỘNG HOÀN TOÀN) ---
 app.post('/api/deploy', async (req, res) => {
-    const { ghToken, repoName } = req.body;
+    const { ghToken, ngrokToken, repoName, rdpPassword } = req.body;
     let logs = [];
 
-    if (!ghToken || !repoName) return res.status(400).send({ message: 'Thiếu thông tin.' });
+    if (!ghToken) return res.status(400).send({ message: 'Thiếu Token' });
 
-    const username = await getUserLogin(ghToken);
-    if (!username) return res.status(401).send({ message: 'Token GitHub không hợp lệ.' });
-    logs.push({ type: 'success', message: `✔ Xác thực thành công: ${username}` });
+    // 1. Lấy User
+    const user = await callGitHub(ghToken, 'GET', '/user');
+    if (user.status !== 200) return res.status(401).send({ message: 'Token sai hoặc hết hạn' });
+    const username = user.data.login;
+    logs.push({ type: 'success', message: `✔ User: ${username}` });
 
-    // Kiểm tra & Xóa Repo cũ
-    const check = await callGitHub(ghToken, 'GET', `/repos/${username}/${repoName}`);
+    const repoPath = `/repos/${username}/${repoName}`;
+
+    // 2. Xóa Repo cũ
+    const check = await callGitHub(ghToken, 'GET', repoPath);
     if (check.status === 200) {
-        await callGitHub(ghToken, 'DELETE', `/repos/${username}/${repoName}`);
-        logs.push({ type: 'warning', message: '⚠ Đã xóa Repository cũ trùng tên.' });
-        await delay(2000); 
+        await callGitHub(ghToken, 'DELETE', repoPath);
+        logs.push({ type: 'warning', message: '⚠ Đã xóa Repo cũ.' });
+        await delay(2000);
     }
 
-    // Tạo Repo mới
+    // 3. Tạo Repo
     const create = await callGitHub(ghToken, 'POST', '/user/repos', { name: repoName, private: true, auto_init: false });
-    if (create.status !== 201) return res.status(400).send({ message: 'Không thể tạo Repo.', logs });
-    logs.push({ type: 'success', message: '✔ Repository mới đã được tạo.' });
+    if (create.status !== 201) return res.status(400).send({ message: 'Lỗi tạo Repo', logs });
+    logs.push({ type: 'success', message: '✔ Repo mới đã tạo.' });
 
-    // Tạo README để khởi tạo nhánh main
-    await callGitHub(ghToken, 'PUT', `/repos/${username}/${repoName}/contents/README.md`, {
-        message: 'init', content: Buffer.from('# RDP Instance').toString('base64')
-    });
-    
-    // Đợi nhánh main sẵn sàng
+    // 4. Tạo File
+    await callGitHub(ghToken, 'PUT', `${repoPath}/contents/README.md`, { message: 'init', content: Buffer.from('# RDP').toString('base64') });
     await delay(2000);
+    await callGitHub(ghToken, 'PUT', `${repoPath}/contents/.github/workflows/main.yml`, { message: 'Add workflow', content: WORKFLOW_BASE64 });
+    logs.push({ type: 'success', message: '✔ Đã nạp Workflow.' });
 
-    // Đẩy file Workflow
-    await callGitHub(ghToken, 'PUT', `/repos/${username}/${repoName}/contents/.github/workflows/main.yml`, {
-        message: 'Add workflow', content: WORKFLOW_BASE64
+    // 5. AUTO ADD SECRET (TỰ ĐỘNG MÃ HÓA)
+    logs.push({ type: 'info', message: '⚙ Đang mã hóa và thêm Secret...' });
+    const keyRes = await callGitHub(ghToken, 'GET', `${repoPath}/actions/secrets/public-key`);
+    if (keyRes.status !== 200) return res.status(400).send({ message: 'Lỗi lấy Public Key', logs });
+    
+    const encrypted = encryptSecret(keyRes.data.key, ngrokToken);
+    await callGitHub(ghToken, 'PUT', `${repoPath}/actions/secrets/NGROK_TOKEN`, {
+        encrypted_value: encrypted.encrypted_value,
+        key_id: keyRes.data.key_id
     });
-    logs.push({ type: 'success', message: '✔ Đã nạp cấu hình Workflow.' });
+    logs.push({ type: 'success', message: '✔ Đã thêm Secret NGROK_TOKEN.' });
 
-    logs.push({ type: 'warning', message: '⚠ CHECKPOINT: Vui lòng thêm Secret NGROK_TOKEN trên GitHub.' });
-    logs.push({ type: 'info', message: `🔗 https://github.com/${username}/${repoName}/settings/secrets/actions` });
-
-    res.status(202).send({ logs });
-});
-
-// 2. Dispatch (Kích hoạt Actions)
-app.post('/api/dispatch', async (req, res) => {
-    const { ghToken, repoName, rdpPassword } = req.body;
-    const username = await getUserLogin(ghToken);
-    if (!username) return res.status(401).send({ message: 'Token Invalid' });
-
-    const dispatch = await callGitHub(ghToken, 'POST', `/repos/${username}/${repoName}/actions/workflows/main.yml/dispatches`, {
+    // 6. DISPATCH (KÍCH HOẠT LUÔN)
+    logs.push({ type: 'info', message: '⚡ Đang kích hoạt máy ảo...' });
+    const dispatch = await callGitHub(ghToken, 'POST', `${repoPath}/actions/workflows/main.yml/dispatches`, {
         ref: 'main',
         inputs: { password: rdpPassword || 'P@sswordRDP!2025' }
     });
 
-    if (dispatch.status !== 204) {
-        return res.status(400).send({ message: `Lỗi kích hoạt: ${dispatch.status}`, logs: [] });
-    }
-
-    res.status(200).send({ logs: [{ type: 'success', message: '✔ Đã kích hoạt Workflow thành công!' }] });
+    if (dispatch.status !== 204) return res.status(400).send({ message: 'Lỗi kích hoạt', logs });
+    
+    logs.push({ type: 'success', message: '✔ Kích hoạt thành công! Đang chờ kết nối...' });
+    res.status(200).send({ logs });
 });
 
-// 3. Get Log (Lấy Link RDP)
+// API LẤY LINK
 app.post('/api/get-rdp-link', async (req, res) => {
     const { ghToken, repoName } = req.body;
-    const username = await getUserLogin(ghToken);
-    if (!username) return res.status(401).send({ message: 'Token Invalid' });
+    const user = await callGitHub(ghToken, 'GET', '/user');
+    if (user.status !== 200) return res.status(401).send({});
+    const username = user.data.login;
 
     const runs = await callGitHub(ghToken, 'GET', `/repos/${username}/${repoName}/actions/runs`);
-    if (runs.status !== 200 || !runs.data.workflow_runs?.length) {
-        return res.status(202).send({ message: 'Đang chờ Workflow khởi động...' });
-    }
+    if (!runs.data?.workflow_runs?.[0]) return res.status(202).send({});
 
-    const latestRun = runs.data.workflow_runs[0];
-    
-    const jobs = await axios.get(latestRun.jobs_url, { headers: { Authorization: `token ${ghToken}` } });
-    if (!jobs.data.jobs?.length) return res.status(202).send({ message: 'Đang chờ Job...' });
-
-    const rdpJob = jobs.data.jobs[0];
+    const jobs = await axios.get(runs.data.workflow_runs[0].jobs_url, { headers: { Authorization: `token ${ghToken}` } });
+    if (!jobs.data?.jobs?.[0]) return res.status(202).send({});
 
     try {
-        const logRes = await axios.get(`${rdpJob.url}/logs`, { 
-            headers: { Authorization: `token ${ghToken}` }, responseType: 'text' 
-        });
-        
-        // Regex tìm link (tìm cả 2 định dạng cho chắc chắn)
-        const logText = logRes.data;
-        let match = logText.match(/:::RDP_LINK:::\s*(tcp:\/\/[\w\.-]+:\d+)/);
-        if (!match) match = logText.match(/RDP ADDRESS:\s*(tcp:\/\/[\w\.-]+:\d+)/);
-
-        if (match && match[1]) {
-            return res.status(200).send({ rdpUrl: match[1] });
-        }
-    } catch (e) {
-        // Log chưa có hoặc lỗi tải
-    }
-
-    return res.status(202).send({ message: 'Đang chờ Ngrok kết nối...' });
+        const log = await axios.get(`${jobs.data.jobs[0].url}/logs`, { headers: { Authorization: `token ${ghToken}` }, responseType: 'text' });
+        const match = log.data.match(/:::RDP_LINK:::\s*(tcp:\/\/[\w\.-]+:\d+)/);
+        if (match) return res.status(200).send({ rdpUrl: match[1] });
+    } catch (e) {}
+    
+    res.status(202).send({});
 });
 
-// 4. Delete
 app.delete('/api/delete', async (req, res) => {
-    const { ghToken, repoName } = req.body;
-    const username = await getUserLogin(ghToken);
-    if (!username) return res.status(401).send({});
-    const del = await callGitHub(ghToken, 'DELETE', `/repos/${username}/${repoName}`);
-    res.status(del.status === 204 ? 200 : 400).send({});
+    const user = await callGitHub(req.body.ghToken, 'GET', '/user');
+    await callGitHub(req.body.ghToken, 'DELETE', `/repos/${user.data.login}/${req.body.repoName}`);
+    res.status(200).send({});
 });
 
-// --- EXPORT CHO VERCEL & LOCAL RUN ---
 module.exports = app;
-
-if (require.main === module) {
-    const PORT = process.env.PORT || 3000;
-    app.listen(PORT, () => console.log(`Server running at http://localhost:${PORT}`));
-}
