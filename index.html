@@ -12,7 +12,6 @@
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
     <style>
         body { font-family: 'Outfit', sans-serif; background: #020617; color: #e2e8f0; min-height: 100vh; }
-        /* Tinh chỉnh Glassmorphism cho màu sắc cao cấp hơn */
         .glass-panel { 
             background: rgba(17, 24, 39, 0.6); 
             backdrop-filter: blur(24px); 
@@ -20,7 +19,7 @@
             box-shadow: 0 25px 50px rgba(0,0,0,0.6); 
         }
         .input-field { background: rgba(15, 23, 42, 0.8); border: 1px solid rgba(168, 85, 247, 0.3); color: white; transition: all 0.3s; }
-        .input-field:focus { border-color: #34d399; box-shadow: 0 0 0 2px rgba(52, 211, 153, 0.3); outline: none; } /* Màu focus Xanh lá cây */
+        .input-field:focus { border-color: #34d399; box-shadow: 0 0 0 2px rgba(52, 211, 153, 0.3); outline: none; }
         .font-mono { font-family: 'Fira Code', monospace; }
         ::-webkit-scrollbar { width: 6px; }
         ::-webkit-scrollbar-track { background: transparent; }
@@ -35,7 +34,6 @@
         const { useState, useEffect, useRef } = React;
         const BASE_API = '';
 
-        // Lưu trạng thái vào LocalStorage
         const useStickyState = (defaultValue, key) => {
             const [value, setValue] = useState(() => {
                 try { return JSON.parse(localStorage.getItem(key)) || defaultValue; } catch { return defaultValue; }
@@ -44,29 +42,21 @@
             return [value, setValue];
         };
 
-        // FIXED ICON COMPONENT (CHỐNG CRASH)
         const Icon = ({ name, className, size = 24 }) => {
             const ref = useRef(null);
-            
             useEffect(() => {
                 if (window.lucide && ref.current) {
                     ref.current.innerHTML = ''; 
                     const iconElement = window.lucide.createIcons({
                         icons: { [name]: window.lucide.icons[name] },
-                        attrs: {
-                            width: size,
-                            height: size,
-                            class: className
-                        },
+                        attrs: { width: size, height: size, class: className },
                         nameAttr: 'data-lucide',
                     });
-
                     if (iconElement && iconElement[name]) {
                         ref.current.appendChild(iconElement[name]);
                     }
                 }
             }, [name, className, size]);
-
             return <span ref={ref} className="inline-flex items-center justify-center" style={{ width: size, height: size }} />;
         };
 
@@ -105,7 +95,7 @@
                 try {
                     const res = await fetch(`${BASE_API}${ep}`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) });
                     return { ok: res.ok, ...(await res.json()) };
-                } catch (e) { return { ok: false, message: 'Lỗi kết nối!' }; }
+                } catch (e) { return { ok: false, message: 'Lỗi kết nối! Hãy chắc chắn Backend đang chạy.' }; }
             };
 
             const checkRdpLink = async () => {
@@ -127,22 +117,16 @@
                 addLog('--- KHỞI TẠO AIRCONTROL INSTANCE ---', 'info');
                 const res = await callApi('/api/deploy', config);
                 if (res.ok) {
-                    res.logs.forEach(l => addLog(l.message, l.type));
-                    setStatus('waiting');
+                    if (res.logs) res.logs.forEach(l => addLog(l.message, l.type));
+                    setStatus('running'); 
+                    addLog('✅ ACTIONS ĐÃ KHỞI ĐỘNG. Đang quét Link RDP (30s-1p)...', 'success');
                 } else {
-                    addLog(`Lỗi: ${res.message}`, 'error'); setStatus('idle');
-                }
-            };
-
-            const handleConfirm = async () => {
-                setStatus('running');
-                addLog('Đang kích hoạt máy ảo...', 'info');
-                const res = await callApi('/api/dispatch', config);
-                if (res.ok) {
-                    addLog('✔ Đã gửi lệnh khởi động.', 'success');
-                    addLog('⏳ Đang quét log để lấy IP (khoảng 1 phút)...', 'warning');
-                } else {
-                    addLog(`Lỗi: ${res.message}`, 'error'); setStatus('waiting');
+                    // FIX LỖI Ở ĐÂY: Kiểm tra res.logs trước khi lặp
+                    if (res.logs && Array.isArray(res.logs)) {
+                        res.logs.forEach(l => addLog(l.message, 'error'));
+                    }
+                    addLog(`✖ Lỗi Deploy: ${res.message}`, 'error');
+                    setStatus('idle');
                 }
             };
 
@@ -179,8 +163,7 @@
                                 </div>
                                 <div className="mt-6 pt-6 border-t border-white/10">
                                     {status === 'idle' && <button onClick={handleDeploy} className="w-full p-4 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-xl shadow-lg shadow-indigo-500/20 transition-all flex justify-center gap-2"><Icon name="cloud-fog" /> TRIỂN KHAI</button>}
-                                    {status === 'waiting' && <div className="space-y-3"><div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-lg text-amber-200 text-xs text-center">⚠ Thêm Secret <b>NGROK_TOKEN</b> trên GitHub rồi bấm nút dưới.</div><button onClick={handleConfirm} className="w-full p-4 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl shadow-lg shadow-emerald-500/20 transition-all flex justify-center gap-2"><Icon name="check-circle" /> XÁC NHẬN & CHẠY</button><button onClick={handleStop} className="w-full py-2 text-slate-500 text-xs">Hủy bỏ</button></div>}
-                                    {['running', 'complete'].includes(status) && <button onClick={handleStop} className="w-full p-4 bg-white/5 hover:bg-red-500/20 text-red-400 font-bold rounded-xl transition-all flex justify-center gap-2"><Icon name="power" /> DỪNG & XÓA</button>}
+                                    {['running', 'complete', 'initializing'].includes(status) && <button onClick={handleStop} className="w-full p-4 bg-white/5 hover:bg-red-500/20 text-red-400 font-bold rounded-xl transition-all flex justify-center gap-2"><Icon name="power" /> DỪNG & XÓA</button>}
                                 </div>
                             </div>
                             <div className="glass-panel rounded-2xl p-6 flex justify-between items-center">
