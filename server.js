@@ -3,16 +3,16 @@ const cors = require('cors');
 const axios = require('axios');
 const path = require('path');
 const app = express();
+const nacl = require('tweetnacl'); // THƯ VIỆN MÃ HÓA MỚI
+nacl.util = require('tweetnacl-util'); // Cần cho Base64/UTF8
 
 app.use(cors());
 app.use(express.json());
-// Phục vụ file tĩnh (index.html) từ thư mục hiện tại
 app.use(express.static(path.join(__dirname)));
 
 const GITHUB_API_URL = 'https://api.github.com';
 
-// --- WORKFLOW CONFIGURATION ---
-// Đã sửa lỗi: Dùng 'choco', 'Start-Process', tăng delay và echo Log đặc biệt
+// --- WORKFLOW CONFIGURATION (Không đổi) ---
 const WORKFLOW_CONTENT = `
 name: Remote Desktop Connection
 
@@ -44,30 +44,19 @@ jobs:
       - name: Configure Ngrok Tunnel
         id: ngrok_setup
         run: |
-          # Cài đặt Ngrok bằng Chocolatey (có sẵn trên Runner)
           choco install ngrok -y
           ngrok authtoken \${{ secrets.NGROK_TOKEN }}
-          
-          # Chạy Ngrok trong nền bằng Start-Process để tránh treo shell
           Start-Process ngrok -ArgumentList "tcp 3389 --region \${{ github.event.inputs.region }}"
-          
-          # Đợi 30 giây để Ngrok khởi động ổn định và tạo tunnel
           Start-Sleep -Seconds 30
-          
-          # Lấy URL từ API nội bộ của Ngrok
           $ngrok_url = (iwr -Uri http://127.0.0.1:4040/api/tunnels).Content | ConvertFrom-Json | Select-Object -ExpandProperty tunnels | Select-Object -ExpandProperty public_url
-          
-          # Ghi URL vào biến môi trường và Log để Web bắt được
           echo "RDP_URL=$ngrok_url" | Out-File -FilePath $env:GITHUB_ENV -Append
           Write-Host ":::RDP_LINK::: $ngrok_url"
         shell: powershell
 
       - name: Configure RDP Credentials
         run: |
-          # Tạo user và thêm vào nhóm Admin
           net user \${{ github.event.inputs.username }} \${{ github.event.inputs.password }} /add
           net localgroup administrators \${{ github.event.inputs.username }} /add
-          # Mở firewall
           netsh advfirewall firewall set rule group="remote desktop" new enable=Yes
 
       - name: Display Connection Info
@@ -86,8 +75,23 @@ jobs:
           Start-Sleep -Seconds 21600
         shell: powershell
 `;
-// Mã hóa Base64 để gửi qua API
 const WORKFLOW_BASE64 = Buffer.from(WORKFLOW_CONTENT).toString('base64');
+
+// Mã hóa Secret bằng Public Key của GitHub
+const encryptSecret = (publicKey, secretValue) => {
+    // Chuyển Public Key và Secret từ Base64/UTF8 sang Uint8Array
+    const key = nacl.util.decodeBase64(publicKey);
+    const secret = nacl.util.decodeUTF8(secretValue);
+    const nonce = nacl.randomBytes(nacl.box.nonceLength);
+    // Mã hóa
+    const encrypted = nacl.box.seal(secret, nonce, key, new Uint8Array(nacl.box.publicKeyLength));
+
+    return {
+        encrypted_value: nacl.util.encodeBase64(encrypted),
+        key_id: nacl.util.encodeBase64(nonce)
+    };
+};
+
 
 // --- HELPER FUNCTIONS ---
 
@@ -116,69 +120,95 @@ const getUserLogin = async (token) => {
 
 // --- API ENDPOINTS ---
 
-// 1. Deploy (Tạo Repo & File)
+// 1. Deploy (Tạo Repo, Thêm Secret, và Dispatch)
 const PORT = process.env.PORT || 3000;
 
 app.post('/api/deploy', async (req, res) => {
-    const { ghToken, repoName } = req.body;
+    const { ghToken, ngrokToken, repoName } = req.body;
     let logs = [];
 
-    if (!ghToken || !repoName) return res.status(400).send({ message: 'Thiếu thông tin.' });
+    if (!ghToken || !ngrokToken || !repoName) return res.status(400).send({ message: 'Thiếu Token hoặc Repo Name.' });
 
     const username = await getUserLogin(ghToken);
     if (!username) return res.status(401).send({ message: 'Token GitHub không hợp lệ.' });
     logs.push({ type: 'success', message: `✔ Xác thực thành công: ${username}` });
+    
+    const repoPath = `/repos/${username}/${repoName}`;
 
-    // Kiểm tra & Xóa Repo cũ
-    const check = await callGitHub(ghToken, 'GET', `/repos/${username}/${repoName}`);
+    // 1. Kiểm tra & Xóa Repo cũ
+    const check = await callGitHub(ghToken, 'GET', repoPath);
     if (check.status === 200) {
-        await callGitHub(ghToken, 'DELETE', `/repos/${username}/${repoName}`);
+        await callGitHub(ghToken, 'DELETE', repoPath);
         logs.push({ type: 'warning', message: '⚠ Đã xóa Repository cũ trùng tên.' });
         await delay(2000); 
     }
 
-    // Tạo Repo mới
+    // 2. Tạo Repo mới
     const create = await callGitHub(ghToken, 'POST', '/user/repos', { name: repoName, private: true, auto_init: false });
     if (create.status !== 201) return res.status(400).send({ message: 'Không thể tạo Repo.', logs });
     logs.push({ type: 'success', message: '✔ Repository mới đã được tạo.' });
 
-    // Tạo README để khởi tạo nhánh main
-    await callGitHub(ghToken, 'PUT', `/repos/${username}/${repoName}/contents/README.md`, {
-        message: 'init', content: Buffer.from('# RDP Instance').toString('base64')
-    });
-    
-    // Đợi nhánh main sẵn sàng
+    // 3. Tạo README & Đẩy Workflow
+    await callGitHub(ghToken, 'PUT', `${repoPath}/contents/README.md`, { message: 'init', content: Buffer.from('# RDP Instance').toString('base64') });
     await delay(2000);
-
-    // Đẩy file Workflow
-    await callGitHub(ghToken, 'PUT', `/repos/${username}/${repoName}/contents/.github/workflows/main.yml`, {
-        message: 'Add workflow', content: WORKFLOW_BASE64
-    });
+    await callGitHub(ghToken, 'PUT', `${repoPath}/contents/.github/workflows/main.yml`, { message: 'Add workflow', content: WORKFLOW_BASE64 });
     logs.push({ type: 'success', message: '✔ Đã nạp cấu hình Workflow.' });
 
-    logs.push({ type: 'warning', message: '⚠ CHECKPOINT: Vui lòng thêm Secret NGROK_TOKEN trên GitHub.' });
-    logs.push({ type: 'info', message: `🔗 https://github.com/${username}/${repoName}/settings/secrets/actions` });
+    // ********* 4. TỰ ĐỘNG THÊM SECRET *********
+    logs.push({ type: 'info', message: '⚙ Đang tự động mã hóa và thêm Secret NGROK_TOKEN...' });
 
-    res.status(202).send({ logs });
-});
+    // A. Lấy Public Key của Repo
+    const keyRes = await callGitHub(ghToken, 'GET', `${repoPath}/actions/secrets/public-key`);
+    if (keyRes.status !== 200) {
+        logs.push({ type: 'error', message: '✖ Không thể lấy Public Key. Kiểm tra lại quyền Secret của Token.' });
+        return res.status(400).send({ message: 'Lỗi lấy Public Key.', logs });
+    }
+    const { key_id, key } = keyRes.data;
 
-// 2. Dispatch (Kích hoạt Actions)
-app.post('/api/dispatch', async (req, res) => {
-    const { ghToken, repoName, rdpPassword } = req.body;
-    const username = await getUserLogin(ghToken);
-    if (!username) return res.status(401).send({ message: 'Token Invalid' });
+    // B. Mã hóa Ngrok Token
+    const encrypted = encryptSecret(key, ngrokToken);
 
-    const dispatch = await callGitHub(ghToken, 'POST', `/repos/${username}/${repoName}/actions/workflows/main.yml/dispatches`, {
+    // C. Gửi Secret đã mã hóa lên GitHub
+    const secretEndpoint = `${repoPath}/actions/secrets/NGROK_TOKEN`;
+    const secretData = {
+        encrypted_value: encrypted.encrypted_value,
+        key_id: key_id
+    };
+    const addSecretRes = await callGitHub(ghToken, 'PUT', secretEndpoint, secretData);
+
+    if (addSecretRes.status !== 201 && addSecretRes.status !== 204) {
+        logs.push({ type: 'error', message: `✖ Lỗi thêm Secret (${addSecretRes.status}). Kiểm tra lại Ngrok Token.` });
+        return res.status(400).send({ message: 'Lỗi thêm Secret.', logs });
+    }
+
+    logs.push({ type: 'success', message: '✔ Secret NGROK_TOKEN đã được thêm thành công!' });
+
+    // ********* 5. TỰ ĐỘNG DISPATCH WORKFLOW *********
+    logs.push({ type: 'info', message: '⚡ Tự động kích hoạt Actions...' });
+
+    const dispatch = await callGitHub(ghToken, 'POST', `${repoPath}/actions/workflows/main.yml/dispatches`, {
         ref: 'main',
-        inputs: { password: rdpPassword || 'P@sswordRDP!2025' }
+        inputs: { password: req.body.rdpPassword || 'P@sswordRDP!2025' }
     });
 
     if (dispatch.status !== 204) {
-        return res.status(400).send({ message: `Lỗi kích hoạt: ${dispatch.status}`, logs: [] });
+        logs.push({ type: 'error', message: '✖ Lỗi kích hoạt Workflow. (Lỗi 404/400).' });
+        return res.status(400).send({ message: 'Lỗi kích hoạt Workflow.', logs });
     }
 
-    res.status(200).send({ logs: [{ type: 'success', message: '✔ Đã kích hoạt Workflow thành công!' }] });
+    logs.push({ type: 'success', message: '✔ Workflow đã khởi động! Bắt đầu quét Link...' });
+
+    // Trả về thành công và chuyển ngay sang trạng thái Running
+    res.status(200).send({ logs });
 });
+
+
+// 2. Dispatch (API này bị loại bỏ)
+app.post('/api/dispatch', async (req, res) => {
+    // API này không còn được dùng nữa, nhưng giữ lại để tránh lỗi Frontend
+    res.status(400).send({ message: 'API này đã bị loại bỏ.' });
+});
+
 
 // 3. Get Log (Lấy Link RDP)
 app.post('/api/get-rdp-link', async (req, res) => {
@@ -187,9 +217,7 @@ app.post('/api/get-rdp-link', async (req, res) => {
     if (!username) return res.status(401).send({ message: 'Token Invalid' });
 
     const runs = await callGitHub(ghToken, 'GET', `/repos/${username}/${repoName}/actions/runs`);
-    if (runs.status !== 200 || !runs.data.workflow_runs?.length) {
-        return res.status(202).send({ message: 'Đang chờ Workflow khởi động...' });
-    }
+    if (runs.status !== 200 || !runs.data.workflow_runs?.length) return res.status(202).send({ message: 'Đang chờ Workflow khởi động...' });
 
     const latestRun = runs.data.workflow_runs[0];
     
@@ -203,7 +231,6 @@ app.post('/api/get-rdp-link', async (req, res) => {
             headers: { Authorization: `token ${ghToken}` }, responseType: 'text' 
         });
         
-        // Regex tìm link (tìm cả 2 định dạng cho chắc chắn)
         const logText = logRes.data;
         let match = logText.match(/:::RDP_LINK:::\s*(tcp:\/\/[\w\.-]+:\d+)/);
         if (!match) match = logText.match(/RDP ADDRESS:\s*(tcp:\/\/[\w\.-]+:\d+)/);
