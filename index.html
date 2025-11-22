@@ -85,7 +85,6 @@
                 if (['running', 'waiting', 'initializing'].includes(status)) {
                     interval = setInterval(() => {
                         setTimer(t => t + 1);
-                        // Chỉ chạy kiểm tra link khi đang ở trạng thái init/running
                         if (['running', 'initializing'].includes(status) && !rdpLink) checkRdpLink();
                     }, 1000);
                 } else { setTimer(0); }
@@ -129,18 +128,23 @@
                 const res = await callApi('/api/deploy', config);
                 if (res.ok) {
                     res.logs.forEach(l => addLog(l.message, l.type));
-                    // Sau khi deploy (Tạo repo, add secret, dispatch) thành công, chuyển thẳng sang running
-                    setStatus('running'); 
-                    addLog('✅ ACTIONS ĐÃ KHỞI ĐỘNG. Đang quét Link RDP (30s-1p)...', 'success');
+                    setStatus('waiting');
                 } else {
-                    res.logs.forEach(l => addLog(l.message, 'error'));
-                    addLog(`✖ Lỗi Deploy: ${res.message}`, 'error');
-                    setStatus('idle');
+                    addLog(`Lỗi: ${res.message}`, 'error'); setStatus('idle');
                 }
             };
 
-            // Hàm Confirm đã bị loại bỏ
-            const handleConfirm = () => { /* No longer used */ };
+            const handleConfirm = async () => {
+                setStatus('running');
+                addLog('Đang kích hoạt máy ảo...', 'info');
+                const res = await callApi('/api/dispatch', config);
+                if (res.ok) {
+                    addLog('✔ Đã gửi lệnh khởi động.', 'success');
+                    addLog('⏳ Đang quét log để lấy IP (khoảng 1 phút)...', 'warning');
+                } else {
+                    addLog(`Lỗi: ${res.message}`, 'error'); setStatus('waiting');
+                }
+            };
 
             const handleStop = async () => {
                 if (!confirm('Xóa toàn bộ?')) return;
@@ -175,10 +179,8 @@
                                 </div>
                                 <div className="mt-6 pt-6 border-t border-white/10">
                                     {status === 'idle' && <button onClick={handleDeploy} className="w-full p-4 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-xl shadow-lg shadow-indigo-500/20 transition-all flex justify-center gap-2"><Icon name="cloud-fog" /> TRIỂN KHAI</button>}
-                                    
-                                    {/* Nút Dừng luôn hiển thị khi không idle */}
-                                    {status !== 'idle' && <button onClick={handleStop} className="w-full p-4 bg-white/5 hover:bg-red-500/20 text-red-400 font-bold rounded-xl transition-all flex justify-center gap-2"><Icon name="power" /> DỪNG & XÓA</button>}
-
+                                    {status === 'waiting' && <div className="space-y-3"><div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-lg text-amber-200 text-xs text-center">⚠ Thêm Secret <b>NGROK_TOKEN</b> trên GitHub rồi bấm nút dưới.</div><button onClick={handleConfirm} className="w-full p-4 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl shadow-lg shadow-emerald-500/20 transition-all flex justify-center gap-2"><Icon name="check-circle" /> XÁC NHẬN & CHẠY</button><button onClick={handleStop} className="w-full py-2 text-slate-500 text-xs">Hủy bỏ</button></div>}
+                                    {['running', 'complete'].includes(status) && <button onClick={handleStop} className="w-full p-4 bg-white/5 hover:bg-red-500/20 text-red-400 font-bold rounded-xl transition-all flex justify-center gap-2"><Icon name="power" /> DỪNG & XÓA</button>}
                                 </div>
                             </div>
                             <div className="glass-panel rounded-2xl p-6 flex justify-between items-center">
