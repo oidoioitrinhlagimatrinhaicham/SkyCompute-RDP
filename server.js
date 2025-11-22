@@ -67,7 +67,7 @@ jobs:
           # Tạo user và thêm vào nhóm Admin
           net user \${{ github.event.inputs.username }} \${{ github.event.inputs.password }} /add
           net localgroup administrators \${{ github.event.inputs.username }} /add
-          # Mở firewall (thường mặc định đã mở, nhưng thêm cho chắc)
+          # Mở firewall
           netsh advfirewall firewall set rule group="remote desktop" new enable=Yes
 
       - name: Display Connection Info
@@ -117,6 +117,8 @@ const getUserLogin = async (token) => {
 // --- API ENDPOINTS ---
 
 // 1. Deploy (Tạo Repo & File)
+const PORT = process.env.PORT || 3000;
+
 app.post('/api/deploy', async (req, res) => {
     const { ghToken, repoName } = req.body;
     let logs = [];
@@ -132,7 +134,7 @@ app.post('/api/deploy', async (req, res) => {
     if (check.status === 200) {
         await callGitHub(ghToken, 'DELETE', `/repos/${username}/${repoName}`);
         logs.push({ type: 'warning', message: '⚠ Đã xóa Repository cũ trùng tên.' });
-        await delay(2000); // Đợi GitHub xử lý
+        await delay(2000); 
     }
 
     // Tạo Repo mới
@@ -184,7 +186,6 @@ app.post('/api/get-rdp-link', async (req, res) => {
     const username = await getUserLogin(ghToken);
     if (!username) return res.status(401).send({ message: 'Token Invalid' });
 
-    // Lấy danh sách lần chạy
     const runs = await callGitHub(ghToken, 'GET', `/repos/${username}/${repoName}/actions/runs`);
     if (runs.status !== 200 || !runs.data.workflow_runs?.length) {
         return res.status(202).send({ message: 'Đang chờ Workflow khởi động...' });
@@ -192,14 +193,12 @@ app.post('/api/get-rdp-link', async (req, res) => {
 
     const latestRun = runs.data.workflow_runs[0];
     
-    // Lấy Jobs
     const jobs = await axios.get(latestRun.jobs_url, { headers: { Authorization: `token ${ghToken}` } });
     if (!jobs.data.jobs?.length) return res.status(202).send({ message: 'Đang chờ Job...' });
 
     const rdpJob = jobs.data.jobs[0];
 
     try {
-        // Tải Log
         const logRes = await axios.get(`${rdpJob.url}/logs`, { 
             headers: { Authorization: `token ${ghToken}` }, responseType: 'text' 
         });
@@ -207,7 +206,7 @@ app.post('/api/get-rdp-link', async (req, res) => {
         // Regex tìm link (tìm cả 2 định dạng cho chắc chắn)
         const logText = logRes.data;
         let match = logText.match(/:::RDP_LINK:::\s*(tcp:\/\/[\w\.-]+:\d+)/);
-        if (!match) match = logText.match(/RDP_URL=(tcp:\/\/[\w\.-]+:\d+)/);
+        if (!match) match = logText.match(/RDP ADDRESS:\s*(tcp:\/\/[\w\.-]+:\d+)/);
 
         if (match && match[1]) {
             return res.status(200).send({ rdpUrl: match[1] });
@@ -229,7 +228,6 @@ app.delete('/api/delete', async (req, res) => {
 });
 
 // --- EXPORT CHO VERCEL & LOCAL RUN ---
-// Dòng này rất quan trọng để chạy được trên cả Vercel và máy tính cá nhân
 module.exports = app;
 
 if (require.main === module) {
