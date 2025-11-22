@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SkyCompute RDP</title>
+    <title>AirControl Platform</title>
     <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
@@ -12,9 +12,15 @@
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
     <style>
         body { font-family: 'Outfit', sans-serif; background: #020617; color: #e2e8f0; min-height: 100vh; }
-        .glass-panel { background: rgba(30, 41, 59, 0.4); backdrop-filter: blur(16px); border: 1px solid rgba(255, 255, 255, 0.08); box-shadow: 0 20px 40px rgba(0,0,0,0.4); }
-        .input-field { background: rgba(15, 23, 42, 0.6); border: 1px solid rgba(148, 163, 184, 0.1); color: white; transition: all 0.3s; }
-        .input-field:focus { border-color: #6366f1; outline: none; }
+        /* Tinh chỉnh Glassmorphism cho màu sắc cao cấp hơn */
+        .glass-panel { 
+            background: rgba(17, 24, 39, 0.6); 
+            backdrop-filter: blur(24px); 
+            border: 1px solid rgba(255, 255, 255, 0.15); 
+            box-shadow: 0 25px 50px rgba(0,0,0,0.6); 
+        }
+        .input-field { background: rgba(15, 23, 42, 0.8); border: 1px solid rgba(168, 85, 247, 0.3); color: white; transition: all 0.3s; }
+        .input-field:focus { border-color: #34d399; box-shadow: 0 0 0 2px rgba(52, 211, 153, 0.3); outline: none; } /* Màu focus Xanh lá cây */
         .font-mono { font-family: 'Fira Code', monospace; }
         ::-webkit-scrollbar { width: 6px; }
         ::-webkit-scrollbar-track { background: transparent; }
@@ -27,7 +33,7 @@
     <div id="root"></div>
     <script type="text/babel">
         const { useState, useEffect, useRef } = React;
-        const BASE_API = ''; // Tự động dùng domain hiện tại
+        const BASE_API = '';
 
         // Lưu trạng thái vào LocalStorage
         const useStickyState = (defaultValue, key) => {
@@ -38,17 +44,38 @@
             return [value, setValue];
         };
 
-        const Icon = ({ name }) => {
-            useEffect(() => window.lucide?.createIcons(), []);
-            return <i data-lucide={name}></i>;
+        // FIXED ICON COMPONENT (CHỐNG CRASH)
+        const Icon = ({ name, className, size = 24 }) => {
+            const ref = useRef(null);
+            
+            useEffect(() => {
+                if (window.lucide && ref.current) {
+                    ref.current.innerHTML = ''; 
+                    const iconElement = window.lucide.createIcons({
+                        icons: { [name]: window.lucide.icons[name] },
+                        attrs: {
+                            width: size,
+                            height: size,
+                            class: className
+                        },
+                        nameAttr: 'data-lucide',
+                    });
+
+                    if (iconElement && iconElement[name]) {
+                        ref.current.appendChild(iconElement[name]);
+                    }
+                }
+            }, [name, className, size]);
+
+            return <span ref={ref} className="inline-flex items-center justify-center" style={{ width: size, height: size }} />;
         };
 
         const App = () => {
-            const [config, setConfig] = useStickyState({ ghToken: '', repoName: 'rdp-vps', ngrokToken: '', rdpPassword: 'Admin@123' }, 'conf_v3');
-            const [logs, setLogs] = useStickyState([], 'logs_v3');
-            const [status, setStatus] = useStickyState('idle', 'status_v3'); 
+            const [config, setConfig] = useStickyState({ ghToken: '', repoName: 'aircontrol-vps', ngrokToken: '', rdpPassword: 'Admin@123' }, 'conf_aircontrol');
+            const [logs, setLogs] = useStickyState([], 'logs_aircontrol');
+            const [status, setStatus] = useStickyState('idle', 'status_aircontrol'); 
             const [timer, setTimer] = useState(0);
-            const [rdpLink, setRdpLink] = useStickyState(null, 'link_v3');
+            const [rdpLink, setRdpLink] = useStickyState(null, 'link_aircontrol');
             const logsEndRef = useRef(null);
 
             useEffect(() => logsEndRef.current?.scrollIntoView({ behavior: "smooth" }), [logs]);
@@ -66,7 +93,12 @@
 
             const addLog = (msg, type = 'info') => {
                 const time = new Date().toLocaleTimeString('en-US', { hour12: false });
-                setLogs(prev => [...prev, { time, msg, type }]);
+                const cleanMsg = msg.replace(/[✔⚠✖ℹ]/g, '').trim();
+                setLogs(prev => [...prev, { time, msg: cleanMsg, type }]);
+            };
+
+            const handleInputChange = (e) => {
+                setConfig(prevConfig => ({ ...prevConfig, [e.target.name]: e.target.value }));
             };
 
             const callApi = async (ep, data) => {
@@ -92,7 +124,7 @@
 
             const handleDeploy = async () => {
                 setLogs([]); setRdpLink(null); setStatus('initializing');
-                addLog('--- KHỞI TẠO ---', 'info');
+                addLog('--- KHỞI TẠO AIRCONTROL INSTANCE ---', 'info');
                 const res = await callApi('/api/deploy', config);
                 if (res.ok) {
                     res.logs.forEach(l => addLog(l.message, l.type));
@@ -104,7 +136,7 @@
 
             const handleConfirm = async () => {
                 setStatus('running');
-                addLog('Đang kích hoạt...', 'info');
+                addLog('Đang kích hoạt máy ảo...', 'info');
                 const res = await callApi('/api/dispatch', config);
                 if (res.ok) {
                     addLog('✔ Đã gửi lệnh khởi động.', 'success');
@@ -122,22 +154,33 @@
                 setStatus('idle'); setRdpLink(null);
             };
 
+            const formatTime = (s) => new Date(s * 1000).toISOString().substr(14, 5);
+
+            const getFormattedOutput = () => {
+                if (!rdpLink) return '';
+                const cleanLink = rdpLink.replace('tcp://', '');
+                return `=====================================================\n✅ RDP Instance IS READY!\nRDP ADDRESS: ${cleanLink}\nUsername: rdpuser\nPassword: ${config.rdpPassword}\n=====================================================`;
+            };
+
             return (
-                <div className="min-h-screen flex items-center justify-center p-6">
+                <div className="min-h-screen flex items-center justify-center p-6 bg-gray-950/90">
                     <div className="w-full max-w-6xl grid grid-cols-1 lg:grid-cols-12 gap-8">
                         <div className="lg:col-span-4 space-y-6">
                             <div className="glass-panel rounded-3xl p-8">
-                                <h1 className="text-2xl font-bold text-white mb-6">SkyCompute RDP</h1>
+                                <h1 className="text-2xl font-bold text-white mb-6 flex items-center gap-3">
+                                    <div className="p-2 rounded-lg bg-indigo-600 shadow-xl shadow-indigo-500/30"><Icon name="air-vent" className="text-white" size={20} /></div> 
+                                    AirControl
+                                </h1>
                                 <div className="space-y-4">
-                                    <input type="password" value={config.ghToken} onChange={e=>setConfig({...config, ghToken:e.target.value})} className="input-field w-full p-3 rounded-xl text-sm" placeholder="GitHub Token" disabled={status!=='idle'} />
-                                    <input type="password" value={config.ngrokToken} onChange={e=>setConfig({...config, ngrokToken:e.target.value})} className="input-field w-full p-3 rounded-xl text-sm" placeholder="Ngrok Token" disabled={status!=='idle'} />
-                                    <input type="text" value={config.repoName} onChange={e=>setConfig({...config, repoName:e.target.value})} className="input-field w-full p-3 rounded-xl text-sm" placeholder="Repo Name" disabled={status!=='idle'} />
-                                    <input type="text" value={config.rdpPassword} onChange={e=>setConfig({...config, rdpPassword:e.target.value})} className="input-field w-full p-3 rounded-xl text-sm text-blue-400" placeholder="Password" disabled={status!=='idle'} />
+                                    <input type="password" name="ghToken" value={config.ghToken} onChange={handleInputChange} className="input-field w-full p-3 rounded-xl text-sm" placeholder="GitHub Token" disabled={status!=='idle'} />
+                                    <input type="password" name="ngrokToken" value={config.ngrokToken} onChange={handleInputChange} className="input-field w-full p-3 rounded-xl text-sm" placeholder="Ngrok Token" disabled={status!=='idle'} />
+                                    <input type="text" name="repoName" value={config.repoName} onChange={handleInputChange} className="input-field w-full p-3 rounded-xl text-sm" placeholder="Repo Name" disabled={status!=='idle'} />
+                                    <input type="text" name="rdpPassword" value={config.rdpPassword} onChange={handleInputChange} className="input-field w-full p-3 rounded-xl text-sm text-purple-400" placeholder="Password" disabled={status!=='idle'} />
                                 </div>
                                 <div className="mt-6 pt-6 border-t border-white/10">
-                                    {status === 'idle' && <button onClick={handleDeploy} className="w-full p-4 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-xl shadow-lg transition-all">TRIỂN KHAI</button>}
-                                    {status === 'waiting' && <div className="space-y-3"><div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-lg text-amber-200 text-xs text-center">⚠ Thêm Secret <b>NGROK_TOKEN</b> trên GitHub rồi bấm dưới.</div><button onClick={handleConfirm} className="w-full p-4 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl shadow-lg transition-all">XÁC NHẬN & CHẠY</button><button onClick={handleStop} className="w-full py-2 text-slate-500 text-xs">Hủy bỏ</button></div>}
-                                    {['running', 'complete'].includes(status) && <button onClick={handleStop} className="w-full p-4 bg-white/5 hover:bg-red-500/20 text-red-400 font-bold rounded-xl transition-all">DỪNG & XÓA</button>}
+                                    {status === 'idle' && <button onClick={handleDeploy} className="w-full p-4 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-xl shadow-lg shadow-indigo-500/20 transition-all flex justify-center gap-2"><Icon name="cloud-fog" /> TRIỂN KHAI</button>}
+                                    {status === 'waiting' && <div className="space-y-3"><div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-lg text-amber-200 text-xs text-center">⚠ Thêm Secret <b>NGROK_TOKEN</b> trên GitHub rồi bấm nút dưới.</div><button onClick={handleConfirm} className="w-full p-4 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl shadow-lg shadow-emerald-500/20 transition-all flex justify-center gap-2"><Icon name="check-circle" /> XÁC NHẬN & CHẠY</button><button onClick={handleStop} className="w-full py-2 text-slate-500 text-xs">Hủy bỏ</button></div>}
+                                    {['running', 'complete'].includes(status) && <button onClick={handleStop} className="w-full p-4 bg-white/5 hover:bg-red-500/20 text-red-400 font-bold rounded-xl transition-all flex justify-center gap-2"><Icon name="power" /> DỪNG & XÓA</button>}
                                 </div>
                             </div>
                             <div className="glass-panel rounded-2xl p-6 flex justify-between items-center">
@@ -151,11 +194,12 @@
                                 <div ref={logsEndRef}></div>
                             </div>
                             {rdpLink && <div className="absolute bottom-0 left-0 w-full bg-emerald-900/95 p-6 animate-slide-up border-t border-emerald-500/50">
-                                <h3 className="text-white font-bold mb-2">✅ RDP READY</h3>
+                                <h3 className="text-white font-bold mb-2 flex items-center gap-2"><Icon name="activity" /> RDP CONNECTION READY</h3>
                                 <div className="bg-black/40 p-4 rounded-lg font-mono text-sm text-emerald-100 space-y-1">
-                                    <p>ADDRESS: <span className="text-white font-bold">{rdpLink.replace('tcp://', '')}</span></p>
-                                    <p>USER: rdpuser</p>
-                                    <p>PASS: {config.rdpPassword}</p>
+                                    <pre className="whitespace-pre-wrap">{getFormattedOutput()}</pre>
+                                    <button onClick={() => navigator.clipboard.writeText(getFormattedOutput())} className="mt-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg transition text-xs flex items-center gap-1">
+                                        <Icon name="copy" size={16} /> Copy All
+                                    </button>
                                 </div>
                             </div>}
                         </div>
